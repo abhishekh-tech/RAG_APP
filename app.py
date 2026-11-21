@@ -14,6 +14,10 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import CharacterTextSplitter
 
 
+# --------------------------------------------------
+# CONFIGURATION
+# --------------------------------------------------
+
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(ROOT_DIR, ".env"))
 
@@ -24,45 +28,66 @@ st.set_page_config(
 )
 
 
-# Build FAISS retriever from uploaded document
+# --------------------------------------------------
+# LOAD EMBEDDING MODEL ONLY ONCE
+# --------------------------------------------------
+
+@st.cache_resource
+def load_embeddings():
+
+    return HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
+
+
+# --------------------------------------------------
+# BUILD RETRIEVER AND FAISS VECTOR DATABASE
+# --------------------------------------------------
+
 @st.cache_resource(show_spinner="Building the document index...")
+
 def build_retriever(document_text: str, filename: str):
 
-    # Convert uploaded text into LangChain Document
+    # Convert text into a LangChain Document
     document = Document(
         page_content=document_text,
         metadata={"source": filename}
     )
 
-    # Split document into smaller chunks
+    # Split document into chunks
     text_splitter = CharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=0
     )
 
-    chunks_of_text = text_splitter.split_documents([document])
+    chunks = text_splitter.split_documents([document])
 
-    # Generate embeddings
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
-    )
+    # Reuse the cached embedding model
+    embeddings = load_embeddings()
 
-    # Create FAISS vector database
-    vector_db = FAISS.from_documents(
-        chunks_of_text,
+    # Build FAISS vector database
+    vectorstore = FAISS.from_documents(
+        chunks,
         embeddings
     )
 
-    return vector_db.as_retriever(
+    # Return retriever
+    return vectorstore.as_retriever(
         search_kwargs={"k": 3}
     )
 
 
-# Build RAG chain
+# --------------------------------------------------
+# BUILD RAG CHAIN
+# --------------------------------------------------
+
 @st.cache_resource
 def build_chain(document_text: str, filename: str, model_name: str):
 
-    retriever = build_retriever(document_text, filename)
+    retriever = build_retriever(
+        document_text,
+        filename
+    )
 
     template = """Answer the question based only on the following context:
 
@@ -77,10 +102,12 @@ If the answer is not in the context, say that the document does not provide enou
 
     model = ChatGroq(
         model=model_name,
-        temperature=0
+        temperature=0,
+        streaming=True
     )
 
     def format_docs(docs):
+
         return "\n\n".join(
             document.page_content for document in docs
         )
@@ -96,7 +123,10 @@ If the answer is not in the context, say that the document does not provide enou
     )
 
 
-# Application UI
+# --------------------------------------------------
+# APPLICATION UI
+# --------------------------------------------------
+
 st.title("Simple RAG Chat")
 
 st.caption(
@@ -104,7 +134,10 @@ st.caption(
 )
 
 
-# Upload documents from computer
+# --------------------------------------------------
+# UPLOAD DOCUMENTS
+# --------------------------------------------------
+
 uploaded_files = st.file_uploader(
     "Upload your documents",
     type=["txt"],
@@ -113,17 +146,22 @@ uploaded_files = st.file_uploader(
 )
 
 
-# Check if documents are uploaded
 if not uploaded_files:
+
     st.info("Please upload at least one .txt document to get started.")
+
     st.stop()
 
 
-# Display uploaded documents
-st.success(f"{len(uploaded_files)} document(s) uploaded successfully!")
+st.success(
+    f"{len(uploaded_files)} document(s) uploaded successfully!"
+)
 
 
-# Allow users to select a document
+# --------------------------------------------------
+# SELECT DOCUMENT
+# --------------------------------------------------
+
 selected_file = st.selectbox(
     "Select a document",
     uploaded_files,
@@ -131,27 +169,47 @@ selected_file = st.selectbox(
 )
 
 
-# Read uploaded document content
+# --------------------------------------------------
+# READ DOCUMENT
+# --------------------------------------------------
+
 try:
+
     document_text = selected_file.getvalue().decode("utf-8")
 
 except UnicodeDecodeError:
-    st.error("Unable to read this file. Please upload a UTF-8 encoded text file.")
+
+    st.error(
+        "Unable to read this file. Please upload a UTF-8 encoded text file."
+    )
+
     st.stop()
 
 
 if not document_text.strip():
+
     st.error("The uploaded document is empty.")
+
     st.stop()
 
 
-# Check Groq API key
+# --------------------------------------------------
+# CHECK GROQ API KEY
+# --------------------------------------------------
+
 if not os.getenv("GROQ_API_KEY"):
-    st.warning("Please configure your GROQ_API_KEY in the environment variables.")
+
+    st.warning(
+        "Please configure your GROQ_API_KEY in the environment variables."
+    )
+
     st.stop()
 
 
-# Question input
+# --------------------------------------------------
+# QUESTION INPUT
+# --------------------------------------------------
+
 question = st.text_area(
     "Ask a question about your document",
     placeholder="What did the document say about inflation?",
@@ -159,7 +217,10 @@ question = st.text_area(
 )
 
 
-# Generate answer
+# --------------------------------------------------
+# GENERATE ANSWER
+# --------------------------------------------------
+
 if st.button(
     "Ask",
     type="primary",
@@ -167,20 +228,23 @@ if st.button(
 ):
 
     try:
-        with st.spinner(
-            "Searching the document and generating an answer..."
-        ):
 
-            chain = build_chain(
-                document_text,
-                selected_file.name,
-                "openai/gpt-oss-120b"
-            )
-
-            answer = chain.invoke(question.strip())
+        chain = build_chain(
+            document_text,
+            selected_file.name,
+            "openai/gpt-oss-120b"
+        )
 
         st.subheader("Answer")
-        st.write(answer)
+
+        with st.spinner("Searching your document..."):
+
+            response = chain.stream(question.strip())
+
+            st.write_stream(response)
 
     except Exception as error:
-        st.error(f"Unable to answer the question: {error}")
+
+        st.error(
+            f"Unable to answer the question: {error}"
+        )
